@@ -125,6 +125,40 @@ let activeExportJob = null;
 let outsideReach = LASER_PRESET.outsideReach;
 let insideReach = LASER_PRESET.insideReach;
 let activeEndMode = LASER_PRESET.endMode;
+const mobileLayoutMedia = window.matchMedia('(max-width: 900px)');
+const handheldMedia = window.matchMedia('(max-width: 900px) and (hover: none) and (pointer: coarse)');
+let previewFitFrame = 0;
+let stageResizeObserver = null;
+
+function fitPreviewToStage() {
+  if (!canvas || canvas.hidden || !previewWidth || !previewHeight) return;
+  const bounds = dropZone.getBoundingClientRect();
+  const availableWidth = Math.max(1, bounds.width - 2);
+  const availableHeight = Math.max(1, bounds.height - 2);
+  const scale = Math.min(availableWidth / previewWidth, availableHeight / previewHeight);
+  canvas.style.width = `${Math.max(1, Math.floor(previewWidth * scale))}px`;
+  canvas.style.height = `${Math.max(1, Math.floor(previewHeight * scale))}px`;
+}
+
+function schedulePreviewFit() {
+  cancelAnimationFrame(previewFitFrame);
+  previewFitFrame = requestAnimationFrame(() => {
+    previewFitFrame = requestAnimationFrame(fitPreviewToStage);
+  });
+}
+
+function updateMobileEmptyCopy() {
+  if (!empty) return;
+  const title = empty.querySelector('strong');
+  const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
+  if (handheldMedia.matches) {
+    if (title) title.textContent = 'Choose a photo or take one';
+    if (message && wasm) message.textContent = 'The Photo button opens the phone camera or photo library. Processing stays on this device.';
+  } else {
+    if (title) title.textContent = 'Open a portrait or take a selfie';
+    if (message && wasm) message.textContent = 'Drop a portrait, choose a file, or take a private selfie.';
+  }
+}
 
 function bytesFromBase64(base64) {
   const binary = atob(base64);
@@ -368,6 +402,7 @@ function queuePreview() {
 
 function drawPreview() {
   if (!previewPixels || !wasm) return;
+  fitPreviewToStage();
   const originalMode = showingOriginal;
   const pixels = originalMode
     ? previewPixels
@@ -503,6 +538,8 @@ function stopCameraStream() {
   cameraVideo.srcObject = null;
   cameraVideo.removeAttribute('src');
   try { cameraVideo.load(); } catch (_) {}
+  cameraView.classList.remove('camera-ready');
+  cameraView.removeAttribute('aria-busy');
   cameraCapture.disabled = true;
   cameraSwitch.disabled = true;
   cameraDevices = [];
@@ -511,12 +548,15 @@ function stopCameraStream() {
 
 function enterCameraMode() {
   detectionToken += 1;
+  document.body.classList.add('camera-open-mobile');
   manualSelecting = false;
   laserManual.classList.remove('active');
   dropZone.classList.remove('manual-select');
   busy.hidden = true;
   empty.hidden = true;
   canvas.hidden = true;
+  cameraView.classList.remove('camera-ready');
+  cameraView.setAttribute('aria-busy', 'true');
   cameraView.hidden = false;
   dropZone.classList.add('camera-active');
   setStageCloseMode('camera');
@@ -525,6 +565,7 @@ function enterCameraMode() {
 
 function leaveCameraMode({ restore = true } = {}) {
   cameraSessionToken += 1;
+  document.body.classList.remove('camera-open-mobile');
   cameraOpening = false;
   stopCameraStream();
   cameraView.hidden = true;
@@ -542,6 +583,7 @@ function leaveCameraMode({ restore = true } = {}) {
 
 function removeCurrentMedia({ showEmpty = true, focusOpen = true } = {}) {
   detectionToken += 1;
+  document.body.classList.remove('camera-open-mobile');
   cameraSessionToken += 1;
   cameraOpening = false;
   renderQueued = false;
@@ -579,8 +621,12 @@ function removeCurrentMedia({ showEmpty = true, focusOpen = true } = {}) {
 
   if (showEmpty) {
     empty.hidden = false;
-    const message = empty.querySelector('span');
-    if (message) message.textContent = 'Photo removed. Local working buffers were cleared. Open another image or take a selfie.';
+    const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
+    if (message) {
+      message.textContent = handheldMedia.matches
+        ? 'Photo removed and local working buffers cleared. Use Photo to choose or take another.'
+        : 'Photo removed. Local working buffers were cleared. Open another image or take a selfie.';
+    }
     if (focusOpen) {
       try { uploadBtn.focus({ preventScroll: true }); } catch (_) {}
     }
@@ -614,6 +660,75 @@ function waitForCameraMetadata(video, timeoutMs = 8000) {
   });
 }
 
+function waitForCameraPlayback(video, timeoutMs = 7000) {
+  const isReady = () => Boolean(
+    video.videoWidth
+    && video.videoHeight
+    && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && !video.paused,
+  );
+  if (isReady()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let frame = 0;
+    let settled = false;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cancelAnimationFrame(frame);
+      video.removeEventListener('playing', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      video.removeEventListener('canplay', onReady);
+      resolve(ready);
+    };
+    const onReady = () => {
+      if (isReady()) finish(true);
+    };
+    const poll = () => {
+      if (isReady()) finish(true);
+      else frame = requestAnimationFrame(poll);
+    };
+    const timeout = setTimeout(() => finish(isReady()), timeoutMs);
+    video.addEventListener('playing', onReady);
+    video.addEventListener('loadeddata', onReady);
+    video.addEventListener('canplay', onReady);
+    frame = requestAnimationFrame(poll);
+  });
+}
+
+async function attachCameraPreview(video, stream) {
+  video.autoplay = true;
+  video.muted = true;
+  video.defaultMuted = true;
+  video.playsInline = true;
+  video.setAttribute('autoplay', '');
+  video.setAttribute('muted', '');
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  video.disablePictureInPicture = true;
+  video.srcObject = stream;
+
+  let playError = null;
+  const firstPlay = video.play().catch((error) => {
+    playError = error;
+  });
+  await waitForCameraMetadata(video);
+  await firstPlay;
+  if (video.paused) {
+    try { await video.play(); } catch (error) { playError = error; }
+  }
+
+  let ready = await waitForCameraPlayback(video);
+  if (!ready) {
+    video.srcObject = null;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    video.srcObject = stream;
+    try { await video.play(); } catch (error) { playError = error; }
+    ready = await waitForCameraPlayback(video, 4000);
+  }
+  if (!ready) throw playError || new Error('The live camera preview did not start.');
+}
+
 async function refreshCameraDevices() {
   if (!navigator.mediaDevices?.enumerateDevices) {
     cameraDevices = [];
@@ -644,11 +759,17 @@ async function startCamera(deviceId = '') {
   enterCameraMode();
   cameraStatus.textContent = 'Requesting camera permission...';
 
-  const video = {
-    width: { ideal: 1920 },
-    height: { ideal: 1080 },
-    frameRate: { ideal: 30, max: 60 },
-  };
+  const video = mobileLayoutMedia.matches
+    ? {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, max: 30 },
+      }
+    : {
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 30, max: 60 },
+      };
   if (deviceId) video.deviceId = { exact: deviceId };
   else video.facingMode = { ideal: 'user' };
 
@@ -660,9 +781,10 @@ async function startCamera(deviceId = '') {
     }
 
     cameraStream = stream;
-    cameraVideo.srcObject = stream;
-    await waitForCameraMetadata(cameraVideo);
-    await cameraVideo.play();
+    cameraStatus.textContent = 'Starting live preview...';
+    await attachCameraPreview(cameraVideo, stream);
+    cameraView.classList.add('camera-ready');
+    cameraView.removeAttribute('aria-busy');
 
     const track = stream.getVideoTracks()[0];
     const settings = track?.getSettings?.() || {};
@@ -835,6 +957,7 @@ async function loadFile(file) {
     empty.hidden = true;
     canvas.hidden = false;
     setControlsEnabled(true);
+    schedulePreviewFit();
     setStageCloseMode('image');
     applyHdrPreset();
     applyLaserPreset();
@@ -2668,7 +2791,26 @@ for (const button of document.querySelectorAll('[data-tab]')) {
   button.addEventListener('click', () => switchTab(button.dataset.tab));
 }
 
-window.addEventListener('resize', queuePreview);
+window.addEventListener('resize', () => {
+  schedulePreviewFit();
+  queuePreview();
+});
+window.addEventListener('orientationchange', () => {
+  setTimeout(() => {
+    schedulePreviewFit();
+    queuePreview();
+  }, 120);
+});
+window.visualViewport?.addEventListener('resize', schedulePreviewFit);
+mobileLayoutMedia.addEventListener?.('change', () => {
+  schedulePreviewFit();
+  updateMobileEmptyCopy();
+});
+handheldMedia.addEventListener?.('change', updateMobileEmptyCopy);
+if (typeof ResizeObserver === 'function') {
+  stageResizeObserver = new ResizeObserver(schedulePreviewFit);
+  stageResizeObserver.observe(dropZone);
+}
 window.addEventListener('pagehide', () => removeCurrentMedia({ showEmpty: false, focusOpen: false }));
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !cameraView.hidden) leaveCameraMode({ restore: true });
@@ -2682,7 +2824,7 @@ updateOutputs();
 switchLaserGroup('beam');
 switchTab('hdr');
 initWasm().then(() => {
-  empty.querySelector('span').textContent = 'Drop a portrait, choose a file, or take a private selfie.';
+  updateMobileEmptyCopy();
 }).catch((error) => {
   console.error(error);
   empty.innerHTML = '<strong>WebAssembly could not start</strong><span>Use a modern browser with WebAssembly enabled.</span>';

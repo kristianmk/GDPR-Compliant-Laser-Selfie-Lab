@@ -18,6 +18,20 @@ python3 -m http.server 8080
 
 Then open `http://localhost:8080`.
 
+
+## Mobile behaviour
+
+The desktop control deck is unchanged. On touch-first phone layouts up to 900 CSS pixels wide, the app uses a mobile-specific presentation:
+
+- The complete image is always fitted inside the preview stage. A `ResizeObserver`, viewport listeners, and explicit canvas sizing prevent tall portrait images from retaining a stale desktop-sized canvas and being clipped after the control panel appears.
+- The preview receives most of the available portrait-screen height. The HDR or laser control area scrolls internally, while the document itself remains fixed to the viewport.
+- Safe-area insets and the stable small viewport height are respected on notched phones and browsers with dynamic toolbars.
+- In landscape orientation, the preview and controls move side by side.
+- The redundant WebRTC **Selfie** button is hidden on coarse-pointer phones. The **Photo** button opens the platform image chooser, which can offer the camera or photo library without forcing either choice.
+- If the live browser-camera workflow is invoked on a supported layout, it becomes a full-screen preview on mobile. The video element is muted and inline, camera playback is actively started, and capture remains disabled until a real video frame is available.
+
+The app does not set the file input's `capture` attribute. This is intentional: forcing `capture="user"` can bypass the ordinary library choice on some devices, whereas `accept="image/*"` allows the operating system to present the appropriate camera and photo options.
+
 ## Eye-local aim model
 
 The default aim is the original geometry used by the first version of the app:
@@ -80,6 +94,8 @@ The camera workflow uses standard browser interfaces:
 - `navigator.mediaDevices.getUserMedia()` requests video only, never audio.
 - `facingMode: "user"` prefers the front camera.
 - `enumerateDevices()` enables camera switching where supported.
+- The preview uses `autoplay`, `muted`, `playsinline`, and the WebKit inline-playback attribute.
+- Playback is explicitly started and the capture button is enabled only after metadata and a current video frame are available.
 - Front-camera preview and capture use matching mirroring.
 - Camera tracks stop after capture, cancellation, media removal, replacement, page exit, or navigation.
 
@@ -130,8 +146,12 @@ Automated Chromium checks covered:
 - every outside-mode endpoint lying outside the frame
 - every inside-mode endpoint remaining inside the frame
 - no JavaScript runtime errors during these checks
+- full-image containment at 402x874, 390x664, 412x915, 360x568, 874x402, 1440x900, and 1280x600
+- no document scrolling at those sizes, with internal control scrolling where required
+- the mobile camera action hidden while the native Photo chooser remains available
+- a simulated live `MediaStream` producing a visible 640x480 desktop preview and a full-screen 720x1280 mobile preview before capture was enabled
 
-A physical Safari/WebKit runtime was not available in the build environment, so the Safari file-button correction was validated structurally rather than by claiming a Safari execution test.
+A physical Safari/WebKit or Android device was not available in the build environment. The mobile checks used Chromium device emulation and a simulated live `MediaStream`, so final acceptance should still include one real iPhone Safari and one real Android browser.
 
 ## Files
 
