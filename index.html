@@ -795,10 +795,13 @@ input[type="color"] { height: 37px; }
 .empty-actions .button-label {
   display: block;
   width: 100%;
+  min-width: 0;
   margin: 0;
   padding: 0;
+  overflow: hidden;
   line-height: 1;
   text-align: center;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 @supports (-webkit-touch-callout: none) {
@@ -1043,8 +1046,6 @@ input[type="color"] { height: 37px; }
 
 
 /* Mobile-only usability: preserve desktop layout, enlarge the preview on touch devices. */
-.mobile-action-label { display: none; }
-
 @media (max-width: 900px) and (hover: none) and (pointer: coarse) {
   html, body { height: 100%; }
   .shell {
@@ -1084,10 +1085,6 @@ input[type="color"] { height: 37px; }
     width: min(290px, 100%);
     grid-template-columns: minmax(0, 1fr);
   }
-  .desktop-action-label { display: none !important; }
-  .mobile-action-label { display: inline; }
-  .empty-actions .desktop-action-label { display: none !important; }
-  .empty-actions .mobile-action-label { display: block !important; }
   .empty-actions > button { min-height: 44px; }
   canvas {
     max-width: calc(100% - 2px);
@@ -1164,7 +1161,7 @@ input[type="color"] { height: 37px; }
         <strong>Open a portrait or take a selfie</strong>
         <span>Starting the local WebAssembly editor...</span>
         <div class="empty-actions">
-          <button class="primary empty-file-button" id="chooseImageEmpty" type="button" aria-controls="fileEmpty"><span class="button-label desktop-action-label">Choose image</span><span class="button-label mobile-action-label">Choose or take photo</span></button>
+          <button class="primary empty-file-button" id="chooseImageEmpty" type="button" aria-controls="fileEmpty"><span class="button-label" id="chooseImageEmptyLabel">Choose image</span></button>
           <button class="ghost" id="cameraEmpty" type="button"><span class="button-label">Take selfie</span></button>
         </div>
         <input class="file-input" id="fileEmpty" type="file" accept="image/*">
@@ -1199,7 +1196,7 @@ input[type="color"] { height: 37px; }
 
     <aside class="panel" aria-label="Editing controls">
       <div class="top-actions">
-        <button class="primary" id="uploadBtn" type="button"><span class="desktop-action-label">Open</span><span class="mobile-action-label">Photo</span></button>
+        <button class="primary" id="uploadBtn" type="button"><span class="button-label" id="uploadBtnLabel">Open</span></button>
         <input class="file-input" id="file" type="file" accept="image/*">
         <button class="ghost" id="cameraBtn" type="button">Selfie</button>
         <button class="ghost" id="compare" type="button" disabled>Compare</button>
@@ -1355,7 +1352,9 @@ const closeImageLabel = $('closeImageLabel');
 const fileInput = $('file');
 const fileInputEmpty = $('fileEmpty');
 const chooseImageEmpty = $('chooseImageEmpty');
+const chooseImageEmptyLabel = $('chooseImageEmptyLabel');
 const uploadBtn = $('uploadBtn');
+const uploadBtnLabel = $('uploadBtnLabel');
 const cameraBtn = $('cameraBtn');
 const cameraEmpty = $('cameraEmpty');
 const cameraView = $('cameraView');
@@ -1490,8 +1489,13 @@ function schedulePreviewFit() {
 function updateMobileEmptyCopy() {
   if (!empty) return;
   const title = empty.querySelector('strong');
-  const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
-  if (handheldMedia.matches) {
+  const message = empty.querySelector('span:not(.button-label)');
+  const handheld = handheldMedia.matches;
+
+  if (chooseImageEmptyLabel) chooseImageEmptyLabel.textContent = handheld ? 'Choose or take photo' : 'Choose image';
+  if (uploadBtnLabel) uploadBtnLabel.textContent = handheld ? 'Photo' : 'Open';
+
+  if (handheld) {
     if (title) title.textContent = 'Choose a photo or take one';
     if (message && wasm) message.textContent = 'The Photo button opens the phone camera or photo library. Processing stays on this device.';
   } else {
@@ -1961,7 +1965,7 @@ function removeCurrentMedia({ showEmpty = true, focusOpen = true } = {}) {
 
   if (showEmpty) {
     empty.hidden = false;
-    const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
+    const message = empty.querySelector('span:not(.button-label)');
     if (message) {
       message.textContent = handheldMedia.matches
         ? 'Photo removed and local working buffers cleared. Use Photo to choose or take another.'

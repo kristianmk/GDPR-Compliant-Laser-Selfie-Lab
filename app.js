@@ -15,7 +15,9 @@ const closeImageLabel = $('closeImageLabel');
 const fileInput = $('file');
 const fileInputEmpty = $('fileEmpty');
 const chooseImageEmpty = $('chooseImageEmpty');
+const chooseImageEmptyLabel = $('chooseImageEmptyLabel');
 const uploadBtn = $('uploadBtn');
+const uploadBtnLabel = $('uploadBtnLabel');
 const cameraBtn = $('cameraBtn');
 const cameraEmpty = $('cameraEmpty');
 const cameraView = $('cameraView');
@@ -150,8 +152,13 @@ function schedulePreviewFit() {
 function updateMobileEmptyCopy() {
   if (!empty) return;
   const title = empty.querySelector('strong');
-  const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
-  if (handheldMedia.matches) {
+  const message = empty.querySelector('span:not(.button-label)');
+  const handheld = handheldMedia.matches;
+
+  if (chooseImageEmptyLabel) chooseImageEmptyLabel.textContent = handheld ? 'Choose or take photo' : 'Choose image';
+  if (uploadBtnLabel) uploadBtnLabel.textContent = handheld ? 'Photo' : 'Open';
+
+  if (handheld) {
     if (title) title.textContent = 'Choose a photo or take one';
     if (message && wasm) message.textContent = 'The Photo button opens the phone camera or photo library. Processing stays on this device.';
   } else {
@@ -621,7 +628,7 @@ function removeCurrentMedia({ showEmpty = true, focusOpen = true } = {}) {
 
   if (showEmpty) {
     empty.hidden = false;
-    const message = empty.querySelector('span:not(.button-label):not(.mobile-action-label):not(.desktop-action-label)');
+    const message = empty.querySelector('span:not(.button-label)');
     if (message) {
       message.textContent = handheldMedia.matches
         ? 'Photo removed and local working buffers cleared. Use Photo to choose or take another.'

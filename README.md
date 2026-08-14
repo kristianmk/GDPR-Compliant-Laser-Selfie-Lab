@@ -161,3 +161,8 @@ A physical Safari/WebKit or Android device was not available in the build enviro
 - `enhance.c`: source for the HDR-style WebAssembly pixel loop
 - `enhance.wasm`: compiled WebAssembly module
 - `THIRD_PARTY_NOTICES.md`: detector attribution and licence notice
+
+
+## Browser notes
+
+- File-picker buttons use a single dynamically updated label, avoiding Safari/WebKit overlap between desktop and mobile button text.

@@ -746,10 +746,13 @@ input[type="color"] { height: 37px; }
 .empty-actions .button-label {
   display: block;
   width: 100%;
+  min-width: 0;
   margin: 0;
   padding: 0;
+  overflow: hidden;
   line-height: 1;
   text-align: center;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 @supports (-webkit-touch-callout: none) {
@@ -994,8 +997,6 @@ input[type="color"] { height: 37px; }
 
 
 /* Mobile-only usability: preserve desktop layout, enlarge the preview on touch devices. */
-.mobile-action-label { display: none; }
-
 @media (max-width: 900px) and (hover: none) and (pointer: coarse) {
   html, body { height: 100%; }
   .shell {
@@ -1035,10 +1036,6 @@ input[type="color"] { height: 37px; }
     width: min(290px, 100%);
     grid-template-columns: minmax(0, 1fr);
   }
-  .desktop-action-label { display: none !important; }
-  .mobile-action-label { display: inline; }
-  .empty-actions .desktop-action-label { display: none !important; }
-  .empty-actions .mobile-action-label { display: block !important; }
   .empty-actions > button { min-height: 44px; }
   canvas {
     max-width: calc(100% - 2px);
