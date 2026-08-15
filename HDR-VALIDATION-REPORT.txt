@@ -1,8 +1,64 @@
 GDPR-Compliant Laser Selfie Lab
-True HDR export validation report
+HDR export validation report
 
 Build artifact:
   gdpr-compliant-laser-selfie-lab-final.html
+
+ULTRA HDR JPEG
+==============
+
+Encoding model:
+  - Primary image: ordinary SDR JPEG, quality 0.95
+  - Secondary image: logarithmic gain-map JPEG, quality 0.90
+  - Gain-map dimensions: one quarter of primary width and height
+  - Primary colour profile: embedded sRGB ICC
+  - Ultra HDR v1: GContainer XMP, gain-map XMP, and MPF
+  - Cross-platform metadata: ISO 21496-1 APP2 in both JPEG images
+  - Legacy behavior: standard viewers display the SDR primary image
+  - HDR behavior: compatible viewers reconstruct the HDR rendition from the gain map
+
+Built-in pre-download validation:
+  - primary and secondary JPEG structure
+  - GContainer gain-map directory and declared secondary length
+  - MPF primary size, secondary size, and secondary offset
+  - embedded gain-map JPEG
+  - gain-map XMP required fields
+  - primary sRGB ICC profile
+  - ISO 21496-1 primary and secondary metadata
+  - ISO version 0, one channel, base colour space, forward direction
+  - common denominator and all rational fields
+  - numerical agreement between XMP and ISO metadata
+  - non-zero HDR headroom
+
+Independent browser export test:
+  Primary dimensions: 960 x 640
+  Gain-map dimensions: 240 x 160
+  Total file size: 53,503 bytes
+  Primary JPEG size: 48,387 bytes
+  Gain-map JPEG size: 5,116 bytes
+  JPEG streams: 2 SOI markers and 2 EOI markers
+  MPF sizes and offsets: valid
+  Primary ISO metadata: minimum_version 0, writer_version 0
+  Gain-map ISO flags: 0x48
+    - single channel
+    - base colour space
+    - forward gain direction
+    - common denominator
+  Common denominator: 1,000,000
+  GainMapMin: 0.000000
+  GainMapMax: 2.539110
+  Gamma: 1.000000
+  OffsetSDR: 0.015625
+  OffsetHDR: 0.015625
+  HDRCapacityMin: 0.000000
+  HDRCapacityMax: 2.539110
+  Maximum content boost: approximately 5.8123x
+  XMP and ISO values: matched within validation tolerance
+  Built-in Ultra HDR validator: passed
+  Browser runtime errors: none
+
+TRUE HDR PNG
+============
 
 Built-in pre-download validation:
   - PNG signature
@@ -40,11 +96,11 @@ Independent laser test:
   Built-in HDR validator: passed
 
 Interpretation:
-  The HDR PNG is not an 8-bit SDR image with an HDR filename or metadata tag.
-  Its pixels are encoded as 16-bit BT.2020 PQ values representing absolute
-  display luminance, with HDR signalling and mastering/content-light metadata.
+  The HDR JPEG is an Ultra HDR gain-map file with a normal SDR fallback, not
+  an ordinary SDR JPEG carrying only an HDR label. The HDR PNG contains direct
+  16-bit BT.2020 PQ samples. Both are technically HDR delivery formats.
 
 Source limitation:
   When the input image is SDR, inverse tone mapping creates a genuine HDR output
-  signal but cannot recover highlight or shadow detail already clipped in the
-  original capture or browser decode.
+  signal or rendition but cannot recover highlight or shadow detail already
+  clipped in the original capture or browser decode.

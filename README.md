@@ -1,6 +1,6 @@
 # GDPR-Compliant Laser Selfie Lab
 
-A compact browser-only portrait editor with an SDR editing preview, genuine 16-bit BT.2100 PQ HDR PNG export, automatic or manual eye placement, seven laser renderers, a browser-camera selfie flow, and an eye-local aiming rig.
+A compact browser-only portrait editor with an SDR editing preview, genuine Ultra HDR JPEG and 16-bit BT.2100 PQ HDR PNG export, automatic or manual eye placement, seven laser renderers, a browser-camera selfie flow, and an eye-local aiming rig.
 
 The name is deliberately tongue-in-cheek. Local-only processing is privacy-friendly, but the title is not a legal certification and does not replace an actual GDPR assessment.
 
@@ -117,9 +117,33 @@ Browser JavaScript cannot certify physical RAM zeroisation or directly erase ina
 
 The export area has two equal buttons side by side. There is no format drop-down.
 
-### JPG
+### HDR JPG: Ultra HDR plus ISO 21496-1
 
-The **Export JPG** button creates a conventional SDR JPEG at quality `0.95`. Transparent source areas are composited over white because JPEG does not support alpha. This is the compatibility and smaller-file option.
+The **Export HDR JPG** button creates a real gain-map HDR JPEG rather than an ordinary SDR JPEG with an HDR label. The file contains:
+
+- a conventional 8-bit SDR JPEG as the primary image, encoded at quality `0.95`
+- a logarithmic 8-bit JPEG gain map at one quarter of the primary width and height, encoded at quality `0.90`
+- Ultra HDR v1 gain-map XMP in the secondary image
+- GContainer XMP and an MPF directory linking the primary image and gain map
+- ISO 21496-1 APP2 metadata in both JPEG images
+- an embedded sRGB ICC profile for the primary image
+
+Legacy JPEG viewers display the SDR primary image normally. A compatible HDR viewer reads the gain map and reconstructs the HDR rendition. Both Ultra HDR v1 and ISO 21496-1 metadata are written from the same numerical gain-map parameters so the two signalling systems agree.
+
+The gain map is calculated from linear-light luminance. The target HDR rendition uses floating-point inverse tone mapping, with ordinary portrait highlights expanding toward approximately 1000 nits and bright laser cores able to reach the 2000-nit mastering range. Gain-map offsets are `1/64`, gamma is `1.0`, and the maximum content boost is calculated from the actual image rather than being hard-coded.
+
+Before download, the app validates:
+
+- primary and secondary JPEG structure
+- GContainer XMP and gain-map XMP
+- MPF image lengths and byte offsets
+- the embedded gain-map JPEG
+- the primary ICC profile
+- ISO 21496-1 version, flags, denominator, and rational metadata
+- numerical agreement between ISO 21496-1 and XMP gain-map values
+- non-zero HDR headroom
+
+JPEG has no alpha channel, so transparent source areas are composited over white. The Ultra HDR file is backward compatible, but websites or applications that recompress the JPEG or remove the secondary image or metadata will leave only the SDR fallback.
 
 ### HDR PNG
 
@@ -138,11 +162,11 @@ The **Export HDR PNG** button creates a genuine HDR image rather than placing an
 
 The portrait grade is evaluated in floating point for HDR export, so it is not first quantised through the app's 8-bit preview result. The laser layer is converted separately to BT.2020 and added as emitted-light energy in the upper HDR range. If the output does not pass the built-in structural and HDR-signalling checks, the download is rejected rather than being presented as HDR.
 
-The on-screen editor preview remains SDR for predictable cross-browser editing. Therefore, the preview is a tone-mapped representation of the result, while the downloaded PNG contains the real PQ HDR signal.
+The on-screen editor preview remains SDR for predictable cross-browser editing. Therefore, the preview is a tone-mapped representation, while the downloaded JPEG or PNG contains the HDR reconstruction data or HDR pixel signal.
 
-An ordinary SDR JPG, PNG, or camera frame cannot contain scene detail that was already clipped before the app received it. For SDR inputs, the app creates genuine HDR output through inverse tone mapping, but it cannot reconstruct missing sensor data. Similarly, browser decoding may tone-map native HDR HEIC or AVIF input before Canvas exposes the pixels. The output format is true HDR; the amount of original captured dynamic range depends on the source and browser decoder.
+An ordinary SDR JPG, PNG, or camera frame cannot contain scene detail that was already clipped before the app received it. For SDR inputs, the app creates genuine HDR output through inverse tone mapping, but it cannot reconstruct missing sensor data. Similarly, browser decoding may tone-map native HDR HEIC or AVIF input before Canvas exposes the pixels. The output formats are real HDR; the amount of original captured dynamic range depends on the source and browser decoder.
 
-HDR PNG support is still less universal than SDR JPEG. A viewer or website that understands PNG `cICP` PQ metadata can present or tone-map it correctly. Software that ignores HDR metadata may display it too dark or may strip the metadata during upload.
+Ultra HDR JPEG generally offers the better backward-compatible delivery format because ordinary software can still show its SDR base. HDR PNG carries a direct 16-bit PQ signal and preserves transparency, but support is less universal. A website or social platform can still strip either format's HDR information during upload or recompression.
 
 ## Cross-browser UI
 
@@ -175,7 +199,11 @@ Automated Chromium checks covered:
 - successful HDR export through both CompressionStream and the built-in stored-Deflate fallback
 - a test portrait reaching approximately 950 nits without lasers
 - a test with laser eyes reaching approximately 1801 nits while remaining within the 2000-nit mastering range
-- JPG export remaining an ordinary SDR JPEG
+- Ultra HDR JPEG export producing an SDR primary image plus a quarter-resolution logarithmic gain-map JPEG
+- valid GContainer XMP, gain-map XMP, MPF image sizes and offsets, and an embedded sRGB ICC profile
+- dual Ultra HDR v1 and ISO 21496-1 metadata with matching numerical gain-map values
+- a built-in pre-download JPEG validator accepting the generated Ultra HDR file
+- an independently parsed test file containing two valid JPEG streams and non-zero HDR headroom
 - full-image containment at 402x874, 390x664, 412x915, 360x568, 874x402, 1440x900, and 1280x600
 - no document scrolling at those sizes, with internal control scrolling where required
 - the mobile camera action hidden while the native Photo chooser remains available
@@ -188,7 +216,7 @@ A physical Safari/WebKit or Android device was not available in the build enviro
 - `index.html`: ready-to-run self-contained application
 - `app.js`: JavaScript extracted from the standalone file for inspection
 - `styles.css`: CSS extracted from the standalone file for inspection
-- `enhance.c`: source for the fast SDR preview and JPG compatibility pixel loop
+- `enhance.c`: source for the fast SDR preview pixel loop used to build the backward-compatible JPEG base
 - `enhance.wasm`: compiled WebAssembly module used by the preview and JPG export
 - `THIRD_PARTY_NOTICES.md`: detector attribution and licence notice
 - `HDR-VALIDATION-REPORT.txt`: independent structural, metadata, luminance, and decoder verification results for the true HDR encoder
