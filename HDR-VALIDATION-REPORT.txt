@@ -1,0 +1,50 @@
+GDPR-Compliant Laser Selfie Lab
+True HDR export validation report
+
+Build artifact:
+  gdpr-compliant-laser-selfie-lab-final.html
+
+Built-in pre-download validation:
+  - PNG signature
+  - IHDR: 16-bit RGBA
+  - cICP: BT.2020 primaries, PQ transfer, RGB matrix, full range
+  - mDCV: mastering display metadata
+  - cLLI: MaxCLL and MaxFALL
+  - CRC validation for metadata chunks
+  - IDAT presence
+
+Independent no-laser test:
+  Dimensions: 160 x 120
+  Pixel format: rgba64be
+  Range: full
+  Primaries: BT.2020
+  Transfer: SMPTE ST 2084 / PQ
+  cICP bytes: 09 10 00 01
+  Mastering luminance: 0.0001 to 2000 nits
+  MaxCLL: 954.4116 nits
+  MaxFALL: 286.2783 nits
+  PNG chunks: IHDR, cICP, mDCV, cLLI, IDAT, IEND
+  CRCs: valid
+  Deflate stream: valid
+  Scanline filter: PNG Sub filter
+
+Independent laser test:
+  Dimensions: 240 x 180
+  Pixel format: rgba64be
+  Range: full
+  Primaries: BT.2020
+  Transfer: SMPTE ST 2084 / PQ
+  Mastering luminance: 0.0001 to 2000 nits
+  MaxCLL: 1849.4450 nits
+  MaxFALL: 127.2987 nits
+  Built-in HDR validator: passed
+
+Interpretation:
+  The HDR PNG is not an 8-bit SDR image with an HDR filename or metadata tag.
+  Its pixels are encoded as 16-bit BT.2020 PQ values representing absolute
+  display luminance, with HDR signalling and mastering/content-light metadata.
+
+Source limitation:
+  When the input image is SDR, inverse tone mapping creates a genuine HDR output
+  signal but cannot recover highlight or shadow detail already clipped in the
+  original capture or browser decode.

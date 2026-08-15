@@ -557,7 +557,10 @@ input[type="color"] {
   transition: transform 120ms ease, filter 120ms ease, border-color 120ms ease;
 }
 .download.jpg { background: linear-gradient(135deg, #e5294f, #a918ff); }
-.download.png { background: linear-gradient(135deg, #176de8, #6550e9); }
+.download.png {
+  background: linear-gradient(135deg, #9b4b08, #d46d16 48%, #8a24b8);
+  border-color: rgba(255,220,155,0.28);
+}
 .download:hover:not(:disabled) {
   filter: brightness(1.08);
   border-color: rgba(255,255,255,0.24);
@@ -1091,4 +1094,5 @@ input[type="color"] { height: 37px; }
     grid-template-rows: minmax(0, 1fr);
   }
 }
+
 

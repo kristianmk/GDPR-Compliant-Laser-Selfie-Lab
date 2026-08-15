@@ -1,6 +1,6 @@
 # GDPR-Compliant Laser Selfie Lab
 
-A compact browser-only portrait editor with local HDR-style enhancement, automatic or manual eye placement, seven laser renderers, a browser-camera selfie flow, an eye-local aiming rig, and JPG or PNG export.
+A compact browser-only portrait editor with an SDR editing preview, genuine 16-bit BT.2100 PQ HDR PNG export, automatic or manual eye placement, seven laser renderers, a browser-camera selfie flow, and an eye-local aiming rig.
 
 The name is deliberately tongue-in-cheek. Local-only processing is privacy-friendly, but the title is not a legal certification and does not replace an actual GDPR assessment.
 
@@ -115,15 +115,34 @@ Browser JavaScript cannot certify physical RAM zeroisation or directly erase ina
 
 ## Export
 
-JPG and PNG are presented as two equal buttons side by side. There is no format drop-down. Each button shows the format as its main label and a concise quality note underneath.
+The export area has two equal buttons side by side. There is no format drop-down.
 
 ### JPG
 
-The **Export JPG** button creates a high-quality JPEG at quality `0.95`. Transparent source areas are composited over white because JPEG does not support alpha. The button identifies JPG as the smaller-file option.
+The **Export JPG** button creates a conventional SDR JPEG at quality `0.95`. Transparent source areas are composited over white because JPEG does not support alpha. This is the compatibility and smaller-file option.
 
-### PNG
+### HDR PNG
 
-The **Export PNG** button creates a lossless PNG with alpha preserved. This is a standard Canvas PNG containing the HDR-style appearance as SDR pixels. It is not an HDR10, PQ, HLG, 10-bit, or mastering-metadata export.
+The **Export HDR PNG** button creates a genuine HDR image rather than placing an HDR label on SDR samples. The encoder:
+
+- writes 16-bit RGB and alpha samples
+- converts linear sRGB into BT.2020 primaries
+- performs floating-point inverse tone mapping into absolute display luminance
+- encodes the result with the BT.2100 Perceptual Quantizer (PQ)
+- signals full-range BT.2020/PQ using a `cICP` chunk with bytes `09 10 00 01`
+- writes `mDCV` mastering-display metadata
+- calculates and writes actual `cLLI` MaxCLL and MaxFALL metadata
+- masters the portrait highlights up to approximately 1000 nits and lets laser cores occupy the range up to 2000 nits
+- preserves alpha in the 16-bit PNG
+- validates the finished file before download, including the PNG signature, 16-bit RGBA `IHDR`, `cICP`, `mDCV`, `cLLI`, metadata CRCs, and the presence of `IDAT`
+
+The portrait grade is evaluated in floating point for HDR export, so it is not first quantised through the app's 8-bit preview result. The laser layer is converted separately to BT.2020 and added as emitted-light energy in the upper HDR range. If the output does not pass the built-in structural and HDR-signalling checks, the download is rejected rather than being presented as HDR.
+
+The on-screen editor preview remains SDR for predictable cross-browser editing. Therefore, the preview is a tone-mapped representation of the result, while the downloaded PNG contains the real PQ HDR signal.
+
+An ordinary SDR JPG, PNG, or camera frame cannot contain scene detail that was already clipped before the app received it. For SDR inputs, the app creates genuine HDR output through inverse tone mapping, but it cannot reconstruct missing sensor data. Similarly, browser decoding may tone-map native HDR HEIC or AVIF input before Canvas exposes the pixels. The output format is true HDR; the amount of original captured dynamic range depends on the source and browser decoder.
+
+HDR PNG support is still less universal than SDR JPEG. A viewer or website that understands PNG `cICP` PQ metadata can present or tone-map it correctly. Software that ignores HDR metadata may display it too dark or may strip the metadata during upload.
 
 ## Cross-browser UI
 
@@ -146,6 +165,17 @@ Automated Chromium checks covered:
 - every outside-mode endpoint lying outside the frame
 - every inside-mode endpoint remaining inside the frame
 - no JavaScript runtime errors during these checks
+- true HDR PNG export producing 16-bit RGBA data with valid PNG CRCs
+- the app's own pre-download HDR validator accepting the generated file
+- independent chunk parsing confirming `IHDR`, `cICP`, `mDCV`, `cLLI`, `IDAT`, and `IEND`
+- FFmpeg `ffprobe` identifying `rgba64be`, full range, SMPTE ST 2084/PQ transfer, and BT.2020 primaries
+- `cICP` signaling of BT.2020 primaries, PQ transfer, RGB matrix, and full range
+- valid `mDCV` and calculated `cLLI` chunks before `IDAT`
+- successful zlib decompression of every generated scanline
+- successful HDR export through both CompressionStream and the built-in stored-Deflate fallback
+- a test portrait reaching approximately 950 nits without lasers
+- a test with laser eyes reaching approximately 1801 nits while remaining within the 2000-nit mastering range
+- JPG export remaining an ordinary SDR JPEG
 - full-image containment at 402x874, 390x664, 412x915, 360x568, 874x402, 1440x900, and 1280x600
 - no document scrolling at those sizes, with internal control scrolling where required
 - the mobile camera action hidden while the native Photo chooser remains available
@@ -158,9 +188,10 @@ A physical Safari/WebKit or Android device was not available in the build enviro
 - `index.html`: ready-to-run self-contained application
 - `app.js`: JavaScript extracted from the standalone file for inspection
 - `styles.css`: CSS extracted from the standalone file for inspection
-- `enhance.c`: source for the HDR-style WebAssembly pixel loop
-- `enhance.wasm`: compiled WebAssembly module
+- `enhance.c`: source for the fast SDR preview and JPG compatibility pixel loop
+- `enhance.wasm`: compiled WebAssembly module used by the preview and JPG export
 - `THIRD_PARTY_NOTICES.md`: detector attribution and licence notice
+- `HDR-VALIDATION-REPORT.txt`: independent structural, metadata, luminance, and decoder verification results for the true HDR encoder
 
 
 ## Browser notes

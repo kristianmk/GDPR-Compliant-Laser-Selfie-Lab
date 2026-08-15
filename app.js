@@ -603,9 +603,11 @@ function removeCurrentMedia({ showEmpty = true, focusOpen = true } = {}) {
 
   if (activeExportJob) {
     activeExportJob.cancelled = true;
+    try { activeExportJob.compressionWriter?.abort(new DOMException('Export cancelled', 'AbortError')); } catch (_) {}
     if (activeExportJob.original?.data) wipeTypedArray(activeExportJob.original.data);
     wipeTypedArray(activeExportJob.enhanced);
     clearCanvasBackingStore(activeExportJob.work);
+    clearCanvasBackingStore(activeExportJob.laser);
     revokeTrackedObjectUrl(activeExportJob.url);
   }
 
@@ -2611,70 +2613,655 @@ function showOriginal(enabled) {
   drawPreview();
 }
 
+const TRUE_HDR_EXPORT = Object.freeze({
+  referenceWhiteNits: 203,
+  basePeakNits: 1000,
+  masteringPeakNits: 2000,
+  masteringBlackNits: 0.0001,
+  mobileMaxPixels: 8000000,
+  desktopMaxPixels: 20000000,
+  mobileMaxEdge: 3840,
+  desktopMaxEdge: 6144,
+  idatChunkSize: 1024 * 1024,
+});
+
+let pngCrcTable = null;
+let srgbLinearLut = null;
+let srgbFloatLinearLut = null;
+let pqCodeLut = null;
+
+function exportDimensions(format) {
+  const sourceWidth = imageSource.width || imageSource.naturalWidth;
+  const sourceHeight = imageSource.height || imageSource.naturalHeight;
+  if (format !== 'hdr') return { width: sourceWidth, height: sourceHeight, scaled: false };
+
+  const handheld = handheldMedia.matches;
+  const maxPixels = handheld ? TRUE_HDR_EXPORT.mobileMaxPixels : TRUE_HDR_EXPORT.desktopMaxPixels;
+  const maxEdge = handheld ? TRUE_HDR_EXPORT.mobileMaxEdge : TRUE_HDR_EXPORT.desktopMaxEdge;
+  const edgeScale = maxEdge / Math.max(sourceWidth, sourceHeight);
+  const pixelScale = Math.sqrt(maxPixels / Math.max(1, sourceWidth * sourceHeight));
+  const scale = Math.min(1, edgeScale, pixelScale);
+  return {
+    width: Math.max(1, Math.round(sourceWidth * scale)),
+    height: Math.max(1, Math.round(sourceHeight * scale)),
+    scaled: scale < 0.9999,
+  };
+}
+
+async function renderEnhancedScene(job, width, height, format, token) {
+  job.work = makeCanvas(width, height);
+  const workContext = job.work.getContext('2d', { willReadFrequently: true });
+  if (!workContext) throw new Error('A 2D canvas could not be created.');
+
+  if (format === 'jpeg') {
+    workContext.fillStyle = '#ffffff';
+    workContext.fillRect(0, 0, width, height);
+  }
+  workContext.drawImage(imageSource, 0, 0, width, height);
+
+  // JPG uses the compact SDR WebAssembly path. HDR is graded later in floating point
+  // before absolute luminance is encoded with BT.2100 PQ.
+  if (format !== 'hdr') {
+    const stripePixelBudget = handheldMedia.matches ? 550000 : 1100000;
+    const stripeHeight = Math.max(1, Math.min(192, Math.floor(stripePixelBudget / Math.max(1, width))));
+    for (let y = 0; y < height; y += stripeHeight) {
+      if (job.cancelled || token !== detectionToken || !imageSource) throw new DOMException('Export cancelled', 'AbortError');
+      const currentHeight = Math.min(stripeHeight, height - y);
+      job.original = workContext.getImageData(0, y, width, currentHeight);
+      job.enhanced = enhancePixels(job.original.data, width, currentHeight);
+      workContext.putImageData(new ImageData(job.enhanced, width, currentHeight), 0, y);
+      wipeTypedArray(job.original.data);
+      job.original = null;
+      wipeTypedArray(job.enhanced);
+      job.enhanced = null;
+      if ((y / stripeHeight) % 4 === 0) {
+        const percent = Math.min(99, Math.round((y + currentHeight) / height * 100));
+        busy.textContent = `Rendering ${percent}%...`;
+        await yieldToUi();
+      }
+    }
+  }
+
+  if (laserEnabled.checked && eyes.length === 2) {
+    job.laser = makeCanvas(width, height);
+    const laserContext = job.laser.getContext('2d', { willReadFrequently: true });
+    drawLasers(laserContext, width, height);
+    if (format !== 'hdr') workContext.drawImage(job.laser, 0, 0);
+  }
+
+  return workContext;
+}
+
+function getSrgbLinearLut() {
+  if (srgbLinearLut) return srgbLinearLut;
+  srgbLinearLut = new Float32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    const value = i / 255;
+    srgbLinearLut[i] = value <= 0.04045
+      ? value / 12.92
+      : Math.pow((value + 0.055) / 1.055, 2.4);
+  }
+  return srgbLinearLut;
+}
+
+function getSrgbFloatLinearLut() {
+  if (srgbFloatLinearLut) return srgbFloatLinearLut;
+  const size = 4096;
+  srgbFloatLinearLut = new Float32Array(size + 1);
+  for (let i = 0; i <= size; i += 1) {
+    const value = i / size;
+    srgbFloatLinearLut[i] = value <= 0.04045
+      ? value / 12.92
+      : Math.pow((value + 0.055) / 1.055, 2.4);
+  }
+  return srgbFloatLinearLut;
+}
+
+function linearFromSrgbFloat(value, lut) {
+  const clamped = Math.max(0, Math.min(1, value));
+  const position = clamped * (lut.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.min(lut.length - 1, lower + 1);
+  const fraction = position - lower;
+  return lut[lower] + (lut[upper] - lut[lower]) * fraction;
+}
+
+function pqEncodeNormalized(luminanceNits) {
+  const m1 = 2610 / 16384;
+  const m2 = 2523 / 32;
+  const c1 = 3424 / 4096;
+  const c2 = 2413 / 128;
+  const c3 = 2392 / 128;
+  const normalizedLuminance = Math.max(0, Math.min(1, luminanceNits / 10000));
+  const powered = Math.pow(normalizedLuminance, m1);
+  return Math.pow((c1 + c2 * powered) / (1 + c3 * powered), m2);
+}
+
+function getPqCodeLut() {
+  if (pqCodeLut) return pqCodeLut;
+  const size = 16384;
+  pqCodeLut = new Uint16Array(size + 1);
+  for (let i = 0; i <= size; i += 1) {
+    const nits = TRUE_HDR_EXPORT.masteringPeakNits * i / size;
+    pqCodeLut[i] = Math.round(pqEncodeNormalized(nits) * 65535);
+  }
+  return pqCodeLut;
+}
+
+function pqCodeForNits(nits, lut) {
+  const maximum = TRUE_HDR_EXPORT.masteringPeakNits;
+  const index = Math.max(0, Math.min(lut.length - 1, Math.round(nits / maximum * (lut.length - 1))));
+  return lut[index];
+}
+
+function buildPngCrcTable() {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let value = n;
+    for (let k = 0; k < 8; k += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[n] = value >>> 0;
+  }
+  return table;
+}
+
+function updatePngCrc(crc, bytes) {
+  const table = pngCrcTable || (pngCrcTable = buildPngCrcTable());
+  let value = crc >>> 0;
+  for (let i = 0; i < bytes.length; i += 1) value = table[(value ^ bytes[i]) & 0xff] ^ (value >>> 8);
+  return value >>> 0;
+}
+
+function uint32Bytes(value) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value >>> 0, false);
+  return bytes;
+}
+
+function pngChunkParts(type, data) {
+  const typeBytes = new Uint8Array(4);
+  for (let i = 0; i < 4; i += 1) typeBytes[i] = type.charCodeAt(i);
+  let crc = updatePngCrc(0xffffffff, typeBytes);
+  crc = updatePngCrc(crc, data);
+  crc = (crc ^ 0xffffffff) >>> 0;
+  return [uint32Bytes(data.length), typeBytes, data, uint32Bytes(crc)];
+}
+
+function pngHeaderData(width, height) {
+  const data = new Uint8Array(13);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, width, false);
+  view.setUint32(4, height, false);
+  data[8] = 16;
+  data[9] = 6;
+  data[10] = 0;
+  data[11] = 0;
+  data[12] = 0;
+  return data;
+}
+
+function pngMasteringDisplayData() {
+  const data = new Uint8Array(24);
+  const view = new DataView(data.buffer);
+  const primaries = [
+    [0.708, 0.292],
+    [0.170, 0.797],
+    [0.131, 0.046],
+  ];
+  let offset = 0;
+  for (const [x, y] of primaries) {
+    view.setUint16(offset, Math.round(x / 0.00002), false);
+    view.setUint16(offset + 2, Math.round(y / 0.00002), false);
+    offset += 4;
+  }
+  view.setUint16(12, Math.round(0.3127 / 0.00002), false);
+  view.setUint16(14, Math.round(0.3290 / 0.00002), false);
+  view.setUint32(16, Math.round(TRUE_HDR_EXPORT.masteringPeakNits / 0.0001), false);
+  view.setUint32(20, Math.max(1, Math.round(TRUE_HDR_EXPORT.masteringBlackNits / 0.0001)), false);
+  return data;
+}
+
+function pngContentLightData(maxCll, maxFall) {
+  const data = new Uint8Array(8);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, Math.max(0, Math.round(maxCll / 0.0001)), false);
+  view.setUint32(4, Math.max(0, Math.round(maxFall / 0.0001)), false);
+  return data;
+}
+
+function createStoredDeflateSink() {
+  const parts = [new Uint8Array([0x78, 0x01])];
+  let pending = new Uint8Array(65535);
+  let pendingLength = 0;
+  let adlerA = 1;
+  let adlerB = 0;
+  let aborted = false;
+
+  const updateAdler = (data) => {
+    for (let i = 0; i < data.length; i += 1) {
+      adlerA = (adlerA + data[i]) % 65521;
+      adlerB = (adlerB + adlerA) % 65521;
+    }
+  };
+
+  const flush = (final) => {
+    const length = pendingLength;
+    const header = new Uint8Array(5);
+    header[0] = final ? 1 : 0;
+    header[1] = length & 0xff;
+    header[2] = length >>> 8;
+    const inverse = (~length) & 0xffff;
+    header[3] = inverse & 0xff;
+    header[4] = inverse >>> 8;
+    parts.push(header, pending.slice(0, length));
+    pending = new Uint8Array(65535);
+    pendingLength = 0;
+  };
+
+  return {
+    async write(data) {
+      if (aborted) throw new DOMException('Export cancelled', 'AbortError');
+      updateAdler(data);
+      let offset = 0;
+      while (offset < data.length) {
+        const available = pending.length - pendingLength;
+        const count = Math.min(available, data.length - offset);
+        pending.set(data.subarray(offset, offset + count), pendingLength);
+        pendingLength += count;
+        offset += count;
+        if (pendingLength === pending.length) flush(false);
+      }
+    },
+    async close() {
+      if (aborted) throw new DOMException('Export cancelled', 'AbortError');
+      flush(true);
+      const adler = new Uint8Array(4);
+      new DataView(adler.buffer).setUint32(0, ((adlerB << 16) | adlerA) >>> 0, false);
+      parts.push(adler);
+      return new Uint8Array(await new Blob(parts).arrayBuffer());
+    },
+    async abort() { aborted = true; },
+  };
+}
+
+function createDeflateSink(job) {
+  if (typeof CompressionStream === 'function') {
+    try {
+      const stream = new CompressionStream('deflate');
+      const writer = stream.writable.getWriter();
+      const output = new Response(stream.readable).arrayBuffer();
+      const sink = {
+        write(data) { return writer.write(data); },
+        async close() {
+          await writer.close();
+          return new Uint8Array(await output);
+        },
+        abort(reason) { return writer.abort(reason); },
+      };
+      job.compressionWriter = sink;
+      return sink;
+    } catch (error) {
+      console.warn('CompressionStream unavailable; using a standards-compliant stored Deflate fallback.', error);
+    }
+  }
+  const sink = createStoredDeflateSink();
+  job.compressionWriter = sink;
+  return sink;
+}
+
+function smoothstep(value) {
+  const clamped = Math.max(0, Math.min(1, value));
+  return clamped * clamped * (3 - 2 * clamped);
+}
+
+async function encodeTrueHdrPng(canvas, laserCanvas, job, token) {
+  const width = canvas.width;
+  const height = canvas.height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const laserContext = laserCanvas?.getContext('2d', { willReadFrequently: true }) || null;
+  const srgb8 = getSrgbLinearLut();
+  const srgbFloat = getSrgbFloatLinearLut();
+  const pq = getPqCodeLut();
+  const sink = createDeflateSink(job);
+  const controls = hdrValues();
+  const expansionStrength = 0.74 + 0.26 * controls.intensity;
+  const rowsPerRead = Math.max(1, Math.min(16, Math.floor(900000 / Math.max(1, width))));
+  let maximumLuminance = 0;
+  let luminanceSum = 0;
+  let pixelCount = 0;
+
+  for (let y = 0; y < height; y += rowsPerRead) {
+    if (job.cancelled || token !== detectionToken || !imageSource) throw new DOMException('Export cancelled', 'AbortError');
+    const chunkHeight = Math.min(rowsPerRead, height - y);
+    const sourceChunk = context.getImageData(0, y, width, chunkHeight);
+    const laserChunk = laserContext ? laserContext.getImageData(0, y, width, chunkHeight) : null;
+
+    for (let row = 0; row < chunkHeight; row += 1) {
+      const scanline = new Uint8Array(1 + width * 8);
+      scanline[0] = 1;
+      const rowOffset = row * width * 4;
+      let output = 1;
+
+      for (let x = 0; x < width; x += 1) {
+        const index = rowOffset + x * 4;
+        const originalR = sourceChunk.data[index] / 255;
+        const originalG = sourceChunk.data[index + 1] / 255;
+        const originalB = sourceChunk.data[index + 2] / 255;
+        const baseAlpha = sourceChunk.data[index + 3] / 255;
+
+        // Apply the portrait grade in floating point, avoiding an additional 8-bit
+        // quantisation pass before the HDR transfer function.
+        let red = originalR * controls.exposureFactor;
+        let green = originalG * controls.exposureFactor;
+        let blue = originalB * controls.exposureFactor;
+        let gradeLuma = Math.max(0, Math.min(1, 0.2126 * red + 0.7152 * green + 0.0722 * blue));
+        const shadowMask = (1 - gradeLuma) * (1 - gradeLuma);
+        const highlightMask = gradeLuma * gradeLuma;
+        const tonalDelta = controls.shadows * shadowMask * 0.34
+          + controls.highlights * highlightMask * 0.30;
+        red += tonalDelta;
+        green += tonalDelta;
+        blue += tonalDelta;
+        red += controls.whites * highlightMask * (1 - red) * 0.55;
+        green += controls.whites * highlightMask * (1 - green) * 0.55;
+        blue += controls.whites * highlightMask * (1 - blue) * 0.55;
+        const contrastFactor = 1 + controls.contrast * 0.55;
+        red = Math.max(0, Math.min(1, 0.5 + (red - 0.5) * contrastFactor));
+        green = Math.max(0, Math.min(1, 0.5 + (green - 0.5) * contrastFactor));
+        blue = Math.max(0, Math.min(1, 0.5 + (blue - 0.5) * contrastFactor));
+        gradeLuma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        const saturation = Math.max(red, green, blue) - Math.min(red, green, blue);
+        const vibranceFactor = 1 + controls.vibrance * (1 - saturation) * 0.85;
+        red = Math.max(0, Math.min(1, gradeLuma + (red - gradeLuma) * vibranceFactor));
+        green = Math.max(0, Math.min(1, gradeLuma + (green - gradeLuma) * vibranceFactor));
+        blue = Math.max(0, Math.min(1, gradeLuma + (blue - gradeLuma) * vibranceFactor));
+        red = Math.max(0, Math.min(1, originalR + (red - originalR) * controls.intensity));
+        green = Math.max(0, Math.min(1, originalG + (green - originalG) * controls.intensity));
+        blue = Math.max(0, Math.min(1, originalB + (blue - originalB) * controls.intensity));
+
+        const rLinear = linearFromSrgbFloat(red, srgbFloat);
+        const gLinear = linearFromSrgbFloat(green, srgbFloat);
+        const bLinear = linearFromSrgbFloat(blue, srgbFloat);
+        const recR = Math.max(0, 0.6274038959 * rLinear + 0.3292830384 * gLinear + 0.0433130657 * bLinear);
+        const recG = Math.max(0, 0.0690972894 * rLinear + 0.9195403951 * gLinear + 0.0113623156 * bLinear);
+        const recB = Math.max(0, 0.0163914389 * rLinear + 0.0880133079 * gLinear + 0.8955952532 * bLinear);
+        const relativeY = Math.max(0, 0.2627 * recR + 0.6780 * recG + 0.0593 * recB);
+
+        const highlight = smoothstep((relativeY - 0.32) / 0.68);
+        const targetY = TRUE_HDR_EXPORT.referenceWhiteNits * relativeY
+          + (TRUE_HDR_EXPORT.basePeakNits - TRUE_HDR_EXPORT.referenceWhiteNits)
+            * highlight * expansionStrength;
+        const pictureScale = relativeY > 1e-9 ? targetY / relativeY : 0;
+        let redNits = recR * pictureScale;
+        let greenNits = recG * pictureScale;
+        let blueNits = recB * pictureScale;
+        let outputAlpha = baseAlpha;
+
+        // The laser layer is converted independently to BT.2020 and added as real
+        // emitted-light energy, allowing the core to occupy the upper HDR range.
+        if (laserChunk) {
+          const laserAlpha = laserChunk.data[index + 3] / 255;
+          if (laserAlpha > 0) {
+            const laserLinearR = srgb8[laserChunk.data[index]];
+            const laserLinearG = srgb8[laserChunk.data[index + 1]];
+            const laserLinearB = srgb8[laserChunk.data[index + 2]];
+            let laserRecR = Math.max(0, 0.6274038959 * laserLinearR + 0.3292830384 * laserLinearG + 0.0433130657 * laserLinearB);
+            let laserRecG = Math.max(0, 0.0690972894 * laserLinearR + 0.9195403951 * laserLinearG + 0.0113623156 * laserLinearB);
+            let laserRecB = Math.max(0, 0.0163914389 * laserLinearR + 0.0880133079 * laserLinearG + 0.8955952532 * laserLinearB);
+            const laserRelativeY = Math.max(1e-9, 0.2627 * laserRecR + 0.6780 * laserRecG + 0.0593 * laserRecB);
+            const signal = Math.max(
+              laserChunk.data[index],
+              laserChunk.data[index + 1],
+              laserChunk.data[index + 2],
+            ) / 255;
+            const shapedSignal = signal * (0.35 + 0.65 * signal);
+            const laserTargetY = (TRUE_HDR_EXPORT.masteringPeakNits - TRUE_HDR_EXPORT.referenceWhiteNits)
+              * shapedSignal;
+            const laserScale = laserTargetY / laserRelativeY;
+            laserRecR *= laserScale * laserAlpha;
+            laserRecG *= laserScale * laserAlpha;
+            laserRecB *= laserScale * laserAlpha;
+
+            outputAlpha = baseAlpha + laserAlpha * (1 - baseAlpha);
+            if (outputAlpha > 1e-9) {
+              redNits = (redNits * baseAlpha + laserRecR) / outputAlpha;
+              greenNits = (greenNits * baseAlpha + laserRecG) / outputAlpha;
+              blueNits = (blueNits * baseAlpha + laserRecB) / outputAlpha;
+            }
+          }
+        }
+
+        const maximumComponent = Math.max(redNits, greenNits, blueNits);
+        if (maximumComponent > TRUE_HDR_EXPORT.masteringPeakNits) {
+          const scale = TRUE_HDR_EXPORT.masteringPeakNits / maximumComponent;
+          redNits *= scale;
+          greenNits *= scale;
+          blueNits *= scale;
+        }
+
+        const actualY = (0.2627 * redNits + 0.6780 * greenNits + 0.0593 * blueNits) * outputAlpha;
+        maximumLuminance = Math.max(maximumLuminance, actualY);
+        luminanceSum += actualY;
+        pixelCount += 1;
+
+        const redCode = pqCodeForNits(redNits, pq);
+        const greenCode = pqCodeForNits(greenNits, pq);
+        const blueCode = pqCodeForNits(blueNits, pq);
+        const alphaCode = Math.round(Math.max(0, Math.min(1, outputAlpha)) * 65535);
+        scanline[output] = redCode >>> 8;
+        scanline[output + 1] = redCode & 0xff;
+        scanline[output + 2] = greenCode >>> 8;
+        scanline[output + 3] = greenCode & 0xff;
+        scanline[output + 4] = blueCode >>> 8;
+        scanline[output + 5] = blueCode & 0xff;
+        scanline[output + 6] = alphaCode >>> 8;
+        scanline[output + 7] = alphaCode & 0xff;
+        output += 8;
+      }
+
+      // PNG Sub filter, with an eight-byte stride for 16-bit RGBA.
+      for (let index = scanline.length - 1; index >= 9; index -= 1) {
+        scanline[index] = (scanline[index] - scanline[index - 8] + 256) & 0xff;
+      }
+      await sink.write(scanline);
+    }
+
+    wipeTypedArray(sourceChunk.data);
+    if (laserChunk) wipeTypedArray(laserChunk.data);
+    const percent = Math.min(99, Math.round((y + chunkHeight) / height * 100));
+    busy.textContent = `Encoding true HDR ${percent}%...`;
+    if ((y / rowsPerRead) % 2 === 0) await yieldToUi();
+  }
+
+  const compressed = await sink.close();
+  job.compressionWriter = null;
+  const maxFall = pixelCount ? luminanceSum / pixelCount : 0;
+  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const parts = [signature];
+  parts.push(...pngChunkParts('IHDR', pngHeaderData(width, height)));
+  parts.push(...pngChunkParts('cICP', new Uint8Array([0x09, 0x10, 0x00, 0x01])));
+  parts.push(...pngChunkParts('mDCV', pngMasteringDisplayData()));
+  parts.push(...pngChunkParts('cLLI', pngContentLightData(maximumLuminance, maxFall)));
+  for (let offset = 0; offset < compressed.length; offset += TRUE_HDR_EXPORT.idatChunkSize) {
+    parts.push(...pngChunkParts('IDAT', compressed.subarray(offset, offset + TRUE_HDR_EXPORT.idatChunkSize)));
+  }
+  parts.push(...pngChunkParts('IEND', new Uint8Array(0)));
+  const blob = new Blob(parts, { type: 'image/png' });
+  wipeTypedArray(compressed);
+  return blob;
+}
+
+async function validateTrueHdrPngBlob(blob) {
+  const prefixLength = Math.min(blob.size, 65536);
+  const bytes = new Uint8Array(await blob.slice(0, prefixLength).arrayBuffer());
+  const expectedSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < 8 || expectedSignature.some((value, index) => bytes[index] !== value)) {
+    throw new Error('HDR validation failed: invalid PNG signature.');
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const found = {
+    ihdr: false,
+    cicp: false,
+    mdcv: false,
+    clli: false,
+    idat: false,
+  };
+  const details = {
+    width: 0,
+    height: 0,
+    bitDepth: 0,
+    colorType: 0,
+    maxCllNits: 0,
+    maxFallNits: 0,
+    masteringPeakNits: 0,
+  };
+
+  let offset = 8;
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset, false);
+    const typeOffset = offset + 4;
+    const type = String.fromCharCode(
+      bytes[typeOffset],
+      bytes[typeOffset + 1],
+      bytes[typeOffset + 2],
+      bytes[typeOffset + 3],
+    );
+    const dataOffset = offset + 8;
+    const crcOffset = dataOffset + length;
+
+    // IDAT can be much larger than the small prefix used for validation. Its
+    // presence is enough here because the encoder has already completed it.
+    if (type === 'IDAT') {
+      found.idat = true;
+      break;
+    }
+    if (crcOffset + 4 > bytes.length) {
+      throw new Error(`HDR validation failed: truncated ${type || 'PNG'} chunk.`);
+    }
+
+    const data = bytes.subarray(dataOffset, crcOffset);
+    const typeBytes = bytes.subarray(typeOffset, typeOffset + 4);
+    let crc = updatePngCrc(0xffffffff, typeBytes);
+    crc = updatePngCrc(crc, data);
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const storedCrc = view.getUint32(crcOffset, false);
+    if (crc !== storedCrc) throw new Error(`HDR validation failed: ${type} CRC mismatch.`);
+
+    if (type === 'IHDR') {
+      if (length !== 13) throw new Error('HDR validation failed: invalid IHDR length.');
+      details.width = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, false);
+      details.height = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(4, false);
+      details.bitDepth = data[8];
+      details.colorType = data[9];
+      found.ihdr = details.width > 0
+        && details.height > 0
+        && details.bitDepth === 16
+        && details.colorType === 6;
+    } else if (type === 'cICP') {
+      found.cicp = length === 4
+        && data[0] === 0x09
+        && data[1] === 0x10
+        && data[2] === 0x00
+        && data[3] === 0x01;
+    } else if (type === 'mDCV') {
+      if (length === 24) {
+        const metadata = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        details.masteringPeakNits = metadata.getUint32(16, false) * 0.0001;
+        found.mdcv = details.masteringPeakNits >= TRUE_HDR_EXPORT.basePeakNits;
+      }
+    } else if (type === 'cLLI') {
+      if (length === 8) {
+        const metadata = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        details.maxCllNits = metadata.getUint32(0, false) * 0.0001;
+        details.maxFallNits = metadata.getUint32(4, false) * 0.0001;
+        found.clli = details.maxCllNits >= details.maxFallNits
+          && details.maxCllNits <= TRUE_HDR_EXPORT.masteringPeakNits + 0.1;
+      }
+    }
+
+    offset = crcOffset + 4;
+  }
+
+  const missing = Object.entries(found)
+    .filter(([, valid]) => !valid)
+    .map(([name]) => name.toUpperCase());
+  if (missing.length) {
+    throw new Error(`HDR validation failed: missing or invalid ${missing.join(', ')}.`);
+  }
+  return details;
+}
+
+function downloadExportBlob(blob, filename, job) {
+  job.url = trackedObjectUrl(blob);
+  const anchor = document.createElement('a');
+  anchor.href = job.url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  const exportedUrl = job.url;
+  job.url = '';
+  setTimeout(() => revokeTrackedObjectUrl(exportedUrl), 1800);
+}
+
 async function exportImage(format) {
-  if (!imageSource || !wasm || !['jpeg', 'png'].includes(format)) return;
+  if (!imageSource || !wasm || !['jpeg', 'hdr'].includes(format)) return;
   const token = detectionToken;
   const job = {
     cancelled: false,
     work: null,
+    laser: null,
     original: null,
     enhanced: null,
+    compressionWriter: null,
     url: '',
   };
   activeExportJob = job;
   busy.hidden = false;
-  busy.textContent = format === 'png' ? 'Rendering PNG...' : 'Rendering JPG...';
+  busy.textContent = format === 'hdr' ? 'Preparing true HDR...' : 'Rendering JPG...';
   exportJpgBtn.disabled = true;
   exportPngBtn.disabled = true;
+
   try {
     await new Promise((resolve) => requestAnimationFrame(resolve));
     if (job.cancelled || token !== detectionToken || !imageSource) return;
 
-    const width = imageSource.width || imageSource.naturalWidth;
-    const height = imageSource.height || imageSource.naturalHeight;
-    job.work = makeCanvas(width, height);
-    const workContext = job.work.getContext('2d', { willReadFrequently: true });
-    if (format === 'jpeg') {
-      workContext.fillStyle = '#ffffff';
-      workContext.fillRect(0, 0, width, height);
-    }
-    workContext.drawImage(imageSource, 0, 0, width, height);
-    job.original = workContext.getImageData(0, 0, width, height);
-    job.enhanced = enhancePixels(job.original.data, width, height);
-    workContext.putImageData(new ImageData(job.enhanced, width, height), 0, 0);
-    drawLasers(workContext, width, height);
-    wipeTypedArray(job.original.data);
-    job.original = null;
-    wipeTypedArray(job.enhanced);
-    job.enhanced = null;
+    const dimensions = exportDimensions(format);
+    await renderEnhancedScene(job, dimensions.width, dimensions.height, format, token);
+    if (job.cancelled || token !== detectionToken || !imageSource) return;
 
-    if (job.cancelled || token !== detectionToken) return;
-    const mime = format === 'png' ? 'image/png' : 'image/jpeg';
-    const quality = format === 'png' ? undefined : 0.95;
-    const blob = await new Promise((resolve) => job.work.toBlob(resolve, mime, quality));
+    let blob;
+    let filename;
+    if (format === 'hdr') {
+      busy.textContent = dimensions.scaled
+        ? `Encoding true HDR at ${dimensions.width}×${dimensions.height}...`
+        : 'Encoding true HDR...';
+      blob = await encodeTrueHdrPng(job.work, job.laser, job, token);
+      busy.textContent = 'Verifying HDR signal and metadata...';
+      const verifiedHdr = await validateTrueHdrPngBlob(blob);
+      console.info('Verified true HDR PNG', verifiedHdr);
+      filename = `${sourceName}-true-hdr-pq.png`;
+    } else {
+      blob = await new Promise((resolve) => job.work.toBlob(resolve, 'image/jpeg', 0.95));
+      filename = `${sourceName}-bright-laser.jpg`;
+    }
+
     if (job.cancelled || token !== detectionToken) return;
     if (!blob) throw new Error('The browser could not encode this image.');
-
-    job.url = trackedObjectUrl(blob);
-    const anchor = document.createElement('a');
-    const extension = format === 'png' ? 'png' : 'jpg';
-    anchor.href = job.url;
-    anchor.download = `${sourceName}-bright-laser.${extension}`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    const exportedUrl = job.url;
-    job.url = '';
-    setTimeout(() => revokeTrackedObjectUrl(exportedUrl), 1500);
+    downloadExportBlob(blob, filename, job);
   } catch (error) {
-    if (!job.cancelled) {
+    if (!job.cancelled && error?.name !== 'AbortError') {
       console.error(error);
-      alert('Could not export this image. Try a smaller source file or another browser.');
+      alert(format === 'hdr'
+        ? 'Could not create the true HDR file. Try a smaller source image or another current browser.'
+        : 'Could not export this image. Try a smaller source file or another browser.');
     }
   } finally {
+    try { await job.compressionWriter?.abort(new DOMException('Export finished', 'AbortError')); } catch (_) {}
     if (job.original?.data) wipeTypedArray(job.original.data);
     wipeTypedArray(job.enhanced);
     clearCanvasBackingStore(job.work);
+    clearCanvasBackingStore(job.laser);
     revokeTrackedObjectUrl(job.url);
     if (activeExportJob === job) activeExportJob = null;
     busy.hidden = true;
@@ -2683,6 +3270,7 @@ async function exportImage(format) {
     exportPngBtn.disabled = disabled;
   }
 }
+
 
 function switchLaserGroup(name) {
   for (const button of document.querySelectorAll('[data-laser-group]')) {
@@ -2733,7 +3321,7 @@ laserAimReset.addEventListener('click', () => resetAimControls({ resetEnding: fa
 presetBtn.addEventListener('click', applyHdrPreset);
 resetBtn.addEventListener('click', resetAll);
 exportJpgBtn.addEventListener('click', () => exportImage('jpeg'));
-exportPngBtn.addEventListener('click', () => exportImage('png'));
+exportPngBtn.addEventListener('click', () => exportImage('hdr'));
 
 compareBtn.addEventListener('pointerdown', () => showOriginal(true));
 compareBtn.addEventListener('pointerup', () => showOriginal(false));
